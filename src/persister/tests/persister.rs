@@ -7,7 +7,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use persister::persister::{Directory, Persister};
+use persister::persister::{DirPersister, Directory, Persister};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -54,6 +54,16 @@ impl Directory for Dir {
     }
 }
 
+// #[test]
+// fn test_real() {
+//     let mut p = Persister::new_raw(DirPersister {
+//         raw_dir: "./mzdata/persistence-raw/".into(),
+//         processed_dir: "./mzdata/persistence-processed/".into(),
+//     });
+
+//     p.run();
+// }
+
 #[test]
 fn test_persistence() {
     let raw_dir = Rc::new(RefCell::new(vec![]));
@@ -72,7 +82,7 @@ fn test_persistence() {
 
     let mut foo_contents = Vec::new();
     Row::pack(&[Datum::Int64(1), Datum::Int64(2), Datum::Int64(1)]).encode(&mut foo_contents);
-    Row::pack(&[Datum::Int64(1), Datum::Int64(2), Datum::Int64(1)]).encode(&mut foo_contents);
+    Row::pack(&[Datum::Int64(0), Datum::Int64(2), Datum::Int64(1)]).encode(&mut foo_contents);
 
     raw_dir.borrow_mut().push(MockFile {
         name: "foo".to_string(),
@@ -81,8 +91,9 @@ fn test_persistence() {
     for _ in 0..10 {
         p.run();
     }
+    p.flush();
 
-    assert_eq!(*output_dir.borrow(), vec!["foo".to_string()]);
+    assert_eq!(*output_dir.borrow(), vec!["outfile-0-1".to_string()]);
 
     let mut bar_contents = Vec::new();
     Row::pack(&[
@@ -91,14 +102,14 @@ fn test_persistence() {
         Datum::Int64(3),
     ])
     .encode(&mut bar_contents);
-    Row::pack(&[Datum::Int64(4), Datum::Int64(8), Datum::Int64(1)]).encode(&mut bar_contents);
+    Row::pack(&[Datum::Int64(1), Datum::Int64(8), Datum::Int64(1)]).encode(&mut bar_contents);
     Row::pack(&[
         Datum::String("goodbye :("),
         Datum::String("world!"),
         Datum::Int64(3),
     ])
     .encode(&mut bar_contents);
-    Row::pack(&[Datum::Int64(7), Datum::Int64(5), Datum::Int64(9)]).encode(&mut bar_contents);
+    Row::pack(&[Datum::Int64(2), Datum::Int64(5), Datum::Int64(9)]).encode(&mut bar_contents);
 
     raw_dir.borrow_mut().push(MockFile {
         name: "bar".to_string(),
@@ -111,9 +122,10 @@ fn test_persistence() {
     for _ in 0..10 {
         p.run();
     }
+    p.flush();
 
     assert_eq!(
         *output_dir.borrow(),
-        vec!["foo".to_string(), "bar".to_string(), "baz".to_string()]
+        vec!["outfile-0-1".to_string(), "outfile-1-3".to_string()]
     );
 }

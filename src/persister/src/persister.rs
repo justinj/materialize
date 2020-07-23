@@ -9,7 +9,7 @@
 
 use byteorder::{ByteOrder, NetworkEndian};
 use std::collections::HashSet;
-use std::fs;
+use std::{env, fs};
 
 use repr::{Datum, Row};
 
@@ -26,11 +26,19 @@ pub trait Directory {
 #[derive(Debug, Clone)]
 pub struct Persister<T: Directory> {
     dir: T,
+    last_offset_persisted: i64,
+    records: Vec<Record>,
+    read_files: HashSet<String>,
 }
 
 impl<T: Directory> Persister<T> {
     pub fn new_raw(dir: T) -> Self {
-        Persister { dir }
+        Persister {
+            dir,
+            last_offset_persisted: -1,
+            records: Vec::new(),
+            read_files: HashSet::new(),
+        }
     }
 
     fn encode_records(data: Vec<Record>) -> Vec<u8> {
@@ -49,22 +57,49 @@ impl<T: Directory> Persister<T> {
     }
 
     pub fn run(&mut self) {
-        let processed = self.dir.processed_files();
         for f in self.dir.list() {
-            if !processed.contains(&f) {
+            if !self.read_files.contains(&f) {
                 let iter = RecordIter {
                     data: self.dir.read(&f),
+                    idx: 0,
                 };
-                let mut recs = iter.collect::<Vec<Record>>();
-                recs.sort_by(|a, b| a.time.cmp(&b.time));
-                self.dir.write_to(f.clone(), Self::encode_records(recs));
+                self.records.extend(iter);
+                self.read_files.insert(f);
             }
         }
+    }
+
+    pub fn flush(&mut self) {
+        self.records.sort_by(|a, b| a.position.cmp(&b.position));
+        let mut prefix_len = 0;
+        let mut to_emit = Vec::new();
+        let mut new_recs = Vec::new();
+        let starting_from = self.last_offset_persisted;
+        for (i, rec) in self.records.drain(..).enumerate() {
+            if rec.position == self.last_offset_persisted + 1 {
+                self.last_offset_persisted += 1;
+                prefix_len = i + 1;
+                to_emit.push(rec);
+            } else {
+                new_recs.push(rec);
+            }
+        }
+        // TODO generate a sane name here
+        self.dir.write_to(
+            format!(
+                "outfile-{}-{}",
+                starting_from + 1,
+                self.last_offset_persisted + 1
+            ),
+            Self::encode_records(to_emit),
+        );
+        self.records = new_recs;
     }
 }
 
 pub struct RecordIter {
     data: Vec<u8>,
+    idx: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -77,13 +112,12 @@ pub struct Record {
 
 impl RecordIter {
     fn next_rec(&mut self) -> Row {
-        let len = NetworkEndian::read_u32(&self.data);
-        let (_, mut rest) = self.data.split_at_mut(4);
-        let (row, data) = rest.split_at_mut(len as usize);
-        let row = row.to_vec().clone();
-        // TODO: slow! figure out how not to copy here?
-        self.data = data.to_vec();
-        Row::decode(row)
+        let (_, data) = self.data.split_at(self.idx);
+        let len = NetworkEndian::read_u32(data) as usize;
+        let (_, data) = data.split_at(4);
+        let (row, _) = data.split_at(len);
+        self.idx += 4 + len;
+        Row::decode(row.to_vec().clone())
     }
 }
 
@@ -91,7 +125,7 @@ impl Iterator for RecordIter {
     type Item = Record;
 
     fn next(&mut self) -> Option<Record> {
-        if self.data.len() == 0 {
+        if self.data.len() <= self.idx {
             return None;
         }
         let row = self.next_rec();
@@ -109,9 +143,9 @@ impl Iterator for RecordIter {
     }
 }
 
-struct DirPersister {
-    raw_dir: String,
-    processed_dir: String,
+pub struct DirPersister {
+    pub raw_dir: String,
+    pub processed_dir: String,
 }
 
 impl DirPersister {
@@ -123,9 +157,10 @@ impl DirPersister {
     }
 
     fn contents(&self, dir: &str) -> Vec<String> {
-        fs::read_dir(dir)
-            .unwrap()
-            .map(|e| e.unwrap().path().to_str().unwrap().into())
+        // TODO: handle dir not existing
+        let dir = fs::read_dir(dir).unwrap();
+
+        dir.map(|e| e.unwrap().path().to_str().unwrap().into())
             .collect()
     }
 }
@@ -145,5 +180,7 @@ impl Directory for DirPersister {
         self.contents(&self.processed_dir).iter().cloned().collect()
     }
 
-    fn write_to(&mut self, s: String, data: Vec<u8>) {}
+    fn write_to(&mut self, s: String, data: Vec<u8>) {
+        fs::write(s, data);
+    }
 }
