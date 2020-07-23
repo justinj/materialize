@@ -16,6 +16,7 @@ members = [
     "src/metabase",
     "src/ore",
     "src/peeker",
+    "src/persister",
     "src/pgrepr",
     "src/pgwire",
     "src/repr",
