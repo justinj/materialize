@@ -1,0 +1,10 @@
+[package]
+name = "persister"
+description = "Persist raw data"
+version = "0.1.0"
+edition = "2018"
+publish = false
+
+[dependencies]
+repr = { path = "../repr" }
+byteorder = "1.3"

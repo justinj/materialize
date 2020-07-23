@@ -2214,6 +2214,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "persister"
+version = "0.1.0"
+dependencies = [
+ "byteorder",
+ "repr",
+]
+
+[[package]]
 name = "pgrepr"
 version = "0.1.0"
 dependencies = [
@@ -2751,6 +2759,7 @@ name = "repr"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "byteorder",
  "chrono",
  "criterion",
  "hex",
