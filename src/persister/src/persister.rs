@@ -8,7 +8,7 @@
 // by the Apache License, Version 2.0.
 
 use byteorder::{ByteOrder, NetworkEndian};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::{env, fs};
 
 use repr::{Datum, Row};
@@ -17,26 +17,52 @@ pub trait Directory {
     // TODO: s/String/Filename/
     fn list(&self) -> Vec<String>;
     fn read(&self, fname: &str) -> Vec<u8>;
-    fn processed_files(&self) -> HashSet<String>;
 
     // TODO make this interface streaming
     fn write_to(&mut self, s: String, data: Vec<u8>);
 }
 
 #[derive(Debug, Clone)]
-pub struct Persister<T: Directory> {
-    dir: T,
+struct SourceState {
     last_offset_persisted: i64,
     records: Vec<Record>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Persister<T: Directory> {
+    dir: T,
+    sources: HashMap<String, SourceState>,
     read_files: HashSet<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InputFile {
+    source_id: String,
+    worker_id: String,
+    startup_time: String,
+    nonce: String,
+    seqnum: usize,
+}
+
+impl InputFile {
+    fn from_fname(input: &str) -> InputFile {
+        // pretty hacky bud.
+        let parts: Vec<&str> = input.split('-').collect();
+        InputFile {
+            source_id: parts[3].into(),
+            worker_id: parts[4].into(),
+            startup_time: parts[5].into(),
+            nonce: parts[6].into(),
+            seqnum: parts[7].parse().unwrap(),
+        }
+    }
 }
 
 impl<T: Directory> Persister<T> {
     pub fn new_raw(dir: T) -> Self {
         Persister {
             dir,
-            last_offset_persisted: -1,
-            records: Vec::new(),
+            sources: HashMap::new(),
             read_files: HashSet::new(),
         }
     }
@@ -59,41 +85,61 @@ impl<T: Directory> Persister<T> {
     pub fn run(&mut self) {
         for f in self.dir.list() {
             if !self.read_files.contains(&f) {
+                let meta = InputFile::from_fname(&f);
+                if !self.sources.contains_key(&meta.source_id) {
+                    self.sources.insert(
+                        meta.source_id.clone(),
+                        SourceState {
+                            last_offset_persisted: 0,
+                            records: Vec::new(),
+                        },
+                    );
+                }
                 let iter = RecordIter {
                     data: self.dir.read(&f),
                     idx: 0,
                 };
-                self.records.extend(iter);
+                self.sources
+                    .get_mut(&meta.source_id)
+                    .unwrap()
+                    .records
+                    .extend(iter);
                 self.read_files.insert(f);
             }
         }
     }
 
     pub fn flush(&mut self) {
-        self.records.sort_by(|a, b| a.position.cmp(&b.position));
-        let mut prefix_len = 0;
-        let mut to_emit = Vec::new();
-        let mut new_recs = Vec::new();
-        let starting_from = self.last_offset_persisted;
-        for (i, rec) in self.records.drain(..).enumerate() {
-            if rec.position == self.last_offset_persisted + 1 {
-                self.last_offset_persisted += 1;
-                prefix_len = i + 1;
-                to_emit.push(rec);
-            } else {
-                new_recs.push(rec);
+        for name in self.sources.keys().cloned().collect::<Vec<String>>() {
+            let mut entry = self.sources.get_mut(&name).unwrap();
+            entry.records.sort_by(|a, b| a.position.cmp(&b.position));
+            let mut prefix_len = 0;
+            let mut to_emit = Vec::new();
+            let mut new_recs = Vec::new();
+            let starting_from = entry.last_offset_persisted;
+            for (i, rec) in entry.records.drain(..).enumerate() {
+                if rec.position == entry.last_offset_persisted + 1 {
+                    entry.last_offset_persisted += 1;
+                    prefix_len = i + 1;
+                    to_emit.push(rec);
+                } else {
+                    new_recs.push(rec);
+                }
             }
+            if to_emit.len() > 0 {
+                // TODO generate a sane name here
+                self.dir.write_to(
+                    format!(
+                        "materialized-source-{}-{}-{}",
+                        name,
+                        starting_from + 1,
+                        entry.last_offset_persisted + 1
+                    ),
+                    Self::encode_records(to_emit),
+                );
+            }
+            entry.records = new_recs;
         }
-        // TODO generate a sane name here
-        self.dir.write_to(
-            format!(
-                "outfile-{}-{}",
-                starting_from + 1,
-                self.last_offset_persisted + 1
-            ),
-            Self::encode_records(to_emit),
-        );
-        self.records = new_recs;
     }
 }
 
@@ -174,10 +220,6 @@ impl Directory for DirPersister {
     fn read(&self, fname: &str) -> Vec<u8> {
         // TODO: no unwrap, this thing needs to return an error
         fs::read(fname).unwrap()
-    }
-
-    fn processed_files(&self) -> HashSet<String> {
-        self.contents(&self.processed_dir).iter().cloned().collect()
     }
 
     fn write_to(&mut self, s: String, data: Vec<u8>) {

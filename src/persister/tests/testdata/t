@@ -1,0 +1,64 @@
+write-file name=materialized-persist-source-u131-0-1595516828-3097853477717279653-0
+[{
+  "data": ["hello"], 
+  "offset": 1,
+  "time": 1,
+  "diff": 1
+}]
+----
+
+awake
+----
+wrote to materialized-source-u131-1-2
+
+# Shouldn't re-flush things.
+awake
+----
+
+awake
+----
+
+write-file name=materialized-persist-source-u131-0-1595516828-3097853477717279653-1
+[{
+  "data": ["hello"], 
+  "offset": 2,
+  "time": 2,
+  "diff": 1
+}]
+----
+
+awake
+----
+wrote to materialized-source-u131-2-3
+
+write-file name=materialized-persist-source-u131-0-1595516828-3097853477717279653-2
+[{
+  "data": ["hello"], 
+  "offset": 4,
+  "time": 2,
+  "diff": 1
+}, {
+  "data": ["hello"], 
+  "offset": 5,
+  "time": 2,
+  "diff": 1
+}]
+----
+
+# No complete prefix, so we shouldn't flush anything.
+awake
+----
+
+# This completes the prefix, so we can flush everything.
+write-file name=materialized-persist-source-u131-0-1595516828-3097853477717279653-3
+[{
+  "data": ["hello"], 
+  "offset": 3,
+  "time": 2,
+  "diff": 1
+}]
+----
+
+awake
+----
+wrote to materialized-source-u131-3-6

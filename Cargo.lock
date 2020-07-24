@@ -2239,7 +2239,9 @@ name = "persister"
 version = "0.1.0"
 dependencies = [
  "byteorder",
+ "datadriven",
  "repr",
+ "serde_json",
 ]
 
 [[package]]
