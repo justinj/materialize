@@ -13,8 +13,9 @@ use std::collections::HashSet;
 use std::fmt::Write;
 use std::rc::Rc;
 
+use anyhow::{Error, Result};
 use datadriven::walk;
-use serde_json::{Result, Value};
+use serde_json::Value;
 
 use persister::persister::{DirPersister, Directory, Persister};
 use repr::{Datum, Row};
@@ -26,25 +27,36 @@ struct MockFs {
 
 impl Directory for MockFs {
     // TODO: s/String/Filename/
-    fn list(&self) -> Vec<String> {
-        self.files.borrow().keys().cloned().collect()
+    fn list(&self) -> Result<Vec<String>, Error> {
+        Ok(self.files.borrow().keys().cloned().collect())
     }
 
-    fn read(&self, fname: &str) -> Vec<u8> {
-        self.files.borrow().get(fname).unwrap().clone()
+    fn read(&self, fname: &str) -> Result<Vec<u8>, Error> {
+        Ok(self.files.borrow().get(fname).unwrap().clone())
     }
 
     // TODO make this interface streaming
-    fn write_to(&mut self, s: String, data: Vec<u8>) {
-        self.events.borrow_mut().push(format!("wrote to {}", s))
+    fn write_to(&mut self, s: String, data: Vec<u8>) -> Result<(), Error> {
+        Ok(self.events.borrow_mut().push(format!("wrote to {}", s)))
+    }
+
+    fn append_to_manifest(&mut self, s: String, from: usize, to: usize) -> Result<(), Error> {
+        Ok(self
+            .events
+            .borrow_mut()
+            .push(format!("appended to manifest: {} [{}, {})", s, from, to)))
     }
 }
 
 #[test]
 fn datadriven() {
     walk("tests/testdata", |f| {
-        let mut files = Rc::new(RefCell::new(HashMap::new()));
-        let mut events = Rc::new(RefCell::new(vec![]));
+        // Super crummy "mock filesystem."
+        let files = Rc::new(RefCell::new(HashMap::new()));
+        // Anything the persister tries to do will instead get logged as an "event" here to be
+        // printed out.
+        let events = Rc::new(RefCell::new(vec![]));
+
         let mut persister = Persister::new_raw(MockFs {
             files: files.clone(),
             events: events.clone(),
@@ -58,9 +70,11 @@ fn datadriven() {
                     let mut out: Vec<u8> = Vec::new();
                     for record in ary {
                         let mut row_data = Vec::new();
+
                         for s in record["data"].as_array().unwrap() {
                             row_data.push(Datum::String(s.as_str().unwrap().clone()));
                         }
+
                         Row::pack(&row_data).encode(&mut out);
 
                         Row::pack(&[
@@ -75,8 +89,7 @@ fn datadriven() {
                         .insert(test_case.args.get("name").unwrap()[0].clone(), out);
                 }
                 "awake" => {
-                    persister.run();
-                    persister.flush();
+                    persister.awake();
                 }
                 _ => {}
             }

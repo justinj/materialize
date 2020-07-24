@@ -7,6 +7,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use anyhow::{anyhow, Error, Result};
 use byteorder::{ByteOrder, NetworkEndian};
 use std::collections::{HashMap, HashSet};
 use std::{env, fs};
@@ -15,13 +16,16 @@ use repr::{Datum, Row};
 
 pub trait Directory {
     // TODO: s/String/Filename/
-    fn list(&self) -> Vec<String>;
-    fn read(&self, fname: &str) -> Vec<u8>;
+    fn list(&self) -> Result<Vec<String>, Error>;
+    fn read(&self, fname: &str) -> Result<Vec<u8>, Error>;
 
     // TODO make this interface streaming
-    fn write_to(&mut self, s: String, data: Vec<u8>);
+    fn write_to(&mut self, s: String, data: Vec<u8>) -> Result<(), Error>;
+    fn append_to_manifest(&mut self, s: String, from: usize, to: usize) -> Result<(), Error>;
 }
 
+// TODO(justin): this can theoretically support partially reading files, we can track up to which
+// byte in a given file we've read and if it's done or not.
 #[derive(Debug, Clone)]
 struct SourceState {
     last_offset_persisted: i64,
@@ -36,7 +40,7 @@ pub struct Persister<T: Directory> {
 }
 
 #[derive(Debug, Clone)]
-pub struct InputFile {
+struct InputFile {
     source_id: String,
     worker_id: String,
     startup_time: String,
@@ -82,8 +86,14 @@ impl<T: Directory> Persister<T> {
         buf
     }
 
-    pub fn run(&mut self) {
-        for f in self.dir.list() {
+    pub fn awake(&mut self) {
+        self.run();
+        self.flush();
+    }
+
+    // TODO result
+    fn run(&mut self) {
+        for f in self.dir.list().unwrap() {
             if !self.read_files.contains(&f) {
                 let meta = InputFile::from_fname(&f);
                 if !self.sources.contains_key(&meta.source_id) {
@@ -96,7 +106,7 @@ impl<T: Directory> Persister<T> {
                     );
                 }
                 let iter = RecordIter {
-                    data: self.dir.read(&f),
+                    data: self.dir.read(&f).unwrap(),
                     idx: 0,
                 };
                 self.sources
@@ -109,8 +119,13 @@ impl<T: Directory> Persister<T> {
         }
     }
 
-    pub fn flush(&mut self) {
-        for name in self.sources.keys().cloned().collect::<Vec<String>>() {
+    fn flush(&mut self) {
+        // TODO(justin): this sorting shouldn't _really_ be necessary, it's just to make the test
+        // output deterministic.
+        let mut sources = self.sources.keys().cloned().collect::<Vec<String>>();
+        sources.sort();
+
+        for name in sources {
             let mut entry = self.sources.get_mut(&name).unwrap();
             entry.records.sort_by(|a, b| a.position.cmp(&b.position));
             let mut prefix_len = 0;
@@ -136,6 +151,11 @@ impl<T: Directory> Persister<T> {
                         entry.last_offset_persisted + 1
                     ),
                     Self::encode_records(to_emit),
+                );
+                self.dir.append_to_manifest(
+                    name,
+                    (starting_from + 1) as usize,
+                    (entry.last_offset_persisted + 1) as usize,
                 );
             }
             entry.records = new_recs;
@@ -201,28 +221,26 @@ impl DirPersister {
             processed_dir,
         }
     }
-
-    fn contents(&self, dir: &str) -> Vec<String> {
-        // TODO: handle dir not existing
-        let dir = fs::read_dir(dir).unwrap();
-
-        dir.map(|e| e.unwrap().path().to_str().unwrap().into())
-            .collect()
-    }
 }
 
 impl Directory for DirPersister {
-    fn list(&self) -> Vec<String> {
-        // TODO: no unwrap, this thing needs to return an error
-        self.contents(&self.raw_dir)
+    fn list(&self) -> Result<Vec<String>, Error> {
+        let dir = fs::read_dir(&self.raw_dir);
+
+        dir?.map(|e| Ok(e.map(|e| e.path().to_str().unwrap_or_else(|| "").to_string())?))
+            .collect()
     }
 
-    fn read(&self, fname: &str) -> Vec<u8> {
+    fn read(&self, fname: &str) -> Result<Vec<u8>, Error> {
         // TODO: no unwrap, this thing needs to return an error
-        fs::read(fname).unwrap()
+        Ok(fs::read(fname)?)
     }
 
-    fn write_to(&mut self, s: String, data: Vec<u8>) {
-        fs::write(s, data);
+    fn write_to(&mut self, s: String, data: Vec<u8>) -> Result<(), Error> {
+        Ok(fs::write(format!("{}/{}", self.processed_dir, s), data)?)
+    }
+
+    fn append_to_manifest(&mut self, s: String, from: usize, to: usize) -> Result<(), Error> {
+        Err(anyhow!("no good chief!"))
     }
 }
