@@ -7,10 +7,11 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use anyhow::{anyhow, Error, Result};
+use anyhow::{Error, Result};
 use byteorder::{ByteOrder, NetworkEndian};
+use csv;
 use std::collections::{HashMap, HashSet};
-use std::{env, fs};
+use std::fs;
 
 use repr::{Datum, Row};
 
@@ -20,8 +21,14 @@ pub trait Directory {
     fn read(&self, fname: &str) -> Result<Vec<u8>, Error>;
 
     // TODO make this interface streaming
-    fn write_to(&mut self, s: String, data: Vec<u8>) -> Result<(), Error>;
-    fn append_to_manifest(&mut self, s: String, from: usize, to: usize) -> Result<(), Error>;
+    fn write_to(&mut self, fname: &str, data: Vec<u8>) -> Result<(), Error>;
+    fn append_to_manifest(
+        &mut self,
+        source_name: &str,
+        fname: &str,
+        from: usize,
+        to: usize,
+    ) -> Result<(), Error>;
 }
 
 // TODO(justin): this can theoretically support partially reading files, we can track up to which
@@ -86,14 +93,14 @@ impl<T: Directory> Persister<T> {
         buf
     }
 
-    pub fn awake(&mut self) {
-        self.run();
-        self.flush();
+    pub fn awake(&mut self) -> Result<(), Error> {
+        self.run()?;
+        self.flush()?;
+        Ok(())
     }
 
-    // TODO result
-    fn run(&mut self) {
-        for f in self.dir.list().unwrap() {
+    fn run(&mut self) -> Result<(), Error> {
+        for f in self.dir.list()? {
             if !self.read_files.contains(&f) {
                 let meta = InputFile::from_fname(&f);
                 if !self.sources.contains_key(&meta.source_id) {
@@ -106,7 +113,7 @@ impl<T: Directory> Persister<T> {
                     );
                 }
                 let iter = RecordIter {
-                    data: self.dir.read(&f).unwrap(),
+                    data: self.dir.read(&f)?,
                     idx: 0,
                 };
                 self.sources
@@ -117,9 +124,11 @@ impl<T: Directory> Persister<T> {
                 self.read_files.insert(f);
             }
         }
+
+        Ok(())
     }
 
-    fn flush(&mut self) {
+    fn flush(&mut self) -> Result<(), Error> {
         // TODO(justin): this sorting shouldn't _really_ be necessary, it's just to make the test
         // output deterministic.
         let mut sources = self.sources.keys().cloned().collect::<Vec<String>>();
@@ -128,38 +137,36 @@ impl<T: Directory> Persister<T> {
         for name in sources {
             let mut entry = self.sources.get_mut(&name).unwrap();
             entry.records.sort_by(|a, b| a.position.cmp(&b.position));
-            let mut prefix_len = 0;
             let mut to_emit = Vec::new();
             let mut new_recs = Vec::new();
-            let starting_from = entry.last_offset_persisted;
-            for (i, rec) in entry.records.drain(..).enumerate() {
+            let starting_from = entry.last_offset_persisted + 1;
+            for rec in entry.records.drain(..) {
                 if rec.position == entry.last_offset_persisted + 1 {
                     entry.last_offset_persisted += 1;
-                    prefix_len = i + 1;
                     to_emit.push(rec);
                 } else {
                     new_recs.push(rec);
                 }
             }
             if to_emit.len() > 0 {
-                // TODO generate a sane name here
-                self.dir.write_to(
-                    format!(
-                        "materialized-source-{}-{}-{}",
-                        name,
-                        starting_from + 1,
-                        entry.last_offset_persisted + 1
-                    ),
-                    Self::encode_records(to_emit),
-                );
-                self.dir.append_to_manifest(
+                let fname = format!(
+                    "materialized-source-{}-{}-{}",
                     name,
-                    (starting_from + 1) as usize,
-                    (entry.last_offset_persisted + 1) as usize,
+                    starting_from,
+                    entry.last_offset_persisted + 1
                 );
+                self.dir.write_to(&fname, Self::encode_records(to_emit))?;
+                self.dir.append_to_manifest(
+                    &name,
+                    &fname,
+                    starting_from as usize,
+                    (entry.last_offset_persisted + 1) as usize,
+                )?;
             }
             entry.records = new_recs;
         }
+
+        Ok(())
     }
 }
 
@@ -223,6 +230,8 @@ impl DirPersister {
     }
 }
 
+const MANIFEST_FILENAME: &'static str = "mz-persistence-manifest";
+
 impl Directory for DirPersister {
     fn list(&self) -> Result<Vec<String>, Error> {
         let dir = fs::read_dir(&self.raw_dir);
@@ -232,15 +241,37 @@ impl Directory for DirPersister {
     }
 
     fn read(&self, fname: &str) -> Result<Vec<u8>, Error> {
-        // TODO: no unwrap, this thing needs to return an error
         Ok(fs::read(fname)?)
     }
 
-    fn write_to(&mut self, s: String, data: Vec<u8>) -> Result<(), Error> {
-        Ok(fs::write(format!("{}/{}", self.processed_dir, s), data)?)
+    fn write_to(&mut self, fname: &str, data: Vec<u8>) -> Result<(), Error> {
+        println!("write to...");
+        fs::create_dir_all(self.processed_dir.clone())?;
+        Ok(fs::write(
+            format!("{}/{}", self.processed_dir, fname),
+            data,
+        )?)
     }
 
-    fn append_to_manifest(&mut self, s: String, from: usize, to: usize) -> Result<(), Error> {
-        Err(anyhow!("no good chief!"))
+    fn append_to_manifest(
+        &mut self,
+        source_name: &str,
+        fname: &str,
+        from: usize,
+        to: usize,
+    ) -> Result<(), Error> {
+        println!(
+            "append to manifest... {}",
+            format!("{}/{}", self.processed_dir, MANIFEST_FILENAME)
+        );
+        fs::create_dir_all(self.processed_dir.clone())?;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .append(true)
+            .open(format!("{}/{}", self.processed_dir, MANIFEST_FILENAME))?;
+        let mut w = csv::Writer::from_writer(file);
+        w.write_record(&[source_name, fname, &from.to_string(), &to.to_string()])?;
+        Ok(())
     }
 }

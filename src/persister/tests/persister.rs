@@ -7,12 +7,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use persister::persister::{DirPersister, Directory, Persister};
-use std::cell::RefCell;
-use std::collections::HashSet;
-use std::rc::Rc;
-
-use repr::{Datum, Row};
+use persister::persister::{DirPersister, Persister};
 
 #[test]
 fn test_real() {
@@ -21,5 +16,5 @@ fn test_real() {
         processed_dir: "./mzdata/persistence-processed/".into(),
     });
 
-    p.awake();
+    p.awake().unwrap();
 }

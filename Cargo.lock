@@ -2240,6 +2240,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "byteorder",
+ "csv",
  "datadriven",
  "repr",
  "serde_json",

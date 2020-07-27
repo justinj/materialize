@@ -9,7 +9,6 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::fmt::Write;
 use std::rc::Rc;
 
@@ -17,7 +16,7 @@ use anyhow::{Error, Result};
 use datadriven::walk;
 use serde_json::Value;
 
-use persister::persister::{DirPersister, Directory, Persister};
+use persister::persister::{Directory, Persister};
 use repr::{Datum, Row};
 
 struct MockFs {
@@ -36,15 +35,24 @@ impl Directory for MockFs {
     }
 
     // TODO make this interface streaming
-    fn write_to(&mut self, s: String, data: Vec<u8>) -> Result<(), Error> {
-        Ok(self.events.borrow_mut().push(format!("wrote to {}", s)))
-    }
-
-    fn append_to_manifest(&mut self, s: String, from: usize, to: usize) -> Result<(), Error> {
+    fn write_to(&mut self, fname: &str, data: Vec<u8>) -> Result<(), Error> {
         Ok(self
             .events
             .borrow_mut()
-            .push(format!("appended to manifest: {} [{}, {})", s, from, to)))
+            .push(format!("wrote {} bytes to {}", data.len(), fname)))
+    }
+
+    fn append_to_manifest(
+        &mut self,
+        source_name: &str,
+        fname: &str,
+        from: usize,
+        to: usize,
+    ) -> Result<(), Error> {
+        Ok(self.events.borrow_mut().push(format!(
+            "appended to manifest: {}: {} [{}, {})",
+            fname, source_name, from, to
+        )))
     }
 }
 
@@ -89,7 +97,7 @@ fn datadriven() {
                         .insert(test_case.args.get("name").unwrap()[0].clone(), out);
                 }
                 "awake" => {
-                    persister.awake();
+                    persister.awake().unwrap();
                 }
                 _ => {}
             }

@@ -9,8 +9,8 @@ write-file name=materialized-persist-source-u131-0-1595516828-309785347771727965
 
 awake
 ----
-wrote to materialized-source-u131-1-2
-appended to manifest: u131 [1, 2)
+wrote 49 bytes to materialized-source-u131-1-2
+appended to manifest: materialized-source-u131-1-2: u131 [1, 2)
 
 # Shouldn't re-flush things.
 awake
@@ -30,8 +30,8 @@ write-file name=materialized-persist-source-u131-0-1595516828-309785347771727965
 
 awake
 ----
-wrote to materialized-source-u131-2-3
-appended to manifest: u131 [2, 3)
+wrote 49 bytes to materialized-source-u131-2-3
+appended to manifest: materialized-source-u131-2-3: u131 [2, 3)
 
 write-file name=materialized-persist-source-u131-0-1595516828-3097853477717279653-2
 [{
@@ -63,5 +63,5 @@ write-file name=materialized-persist-source-u131-0-1595516828-309785347771727965
 
 awake
 ----
-wrote to materialized-source-u131-3-6
-appended to manifest: u131 [3, 6)
+wrote 147 bytes to materialized-source-u131-3-6
+appended to manifest: materialized-source-u131-3-6: u131 [3, 6)
