@@ -245,7 +245,6 @@ impl Directory for DirPersister {
     }
 
     fn write_to(&mut self, fname: &str, data: Vec<u8>) -> Result<(), Error> {
-        println!("write to...");
         fs::create_dir_all(self.processed_dir.clone())?;
         Ok(fs::write(
             format!("{}/{}", self.processed_dir, fname),
@@ -260,10 +259,6 @@ impl Directory for DirPersister {
         from: usize,
         to: usize,
     ) -> Result<(), Error> {
-        println!(
-            "append to manifest... {}",
-            format!("{}/{}", self.processed_dir, MANIFEST_FILENAME)
-        );
         fs::create_dir_all(self.processed_dir.clone())?;
         let file = fs::OpenOptions::new()
             .write(true)
