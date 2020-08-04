@@ -10,10 +10,13 @@
 //! Types related to the creation of dataflow sources.
 
 use avro::types::Value;
+use byteorder::{ByteOrder, NetworkEndian};
+use core::fmt::Debug;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::convert::TryInto;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -23,11 +26,12 @@ use timely::dataflow::{
     operators::Capability,
 };
 
+use anyhow::Error;
 use dataflow_types::{
     Consistency, DataEncoding, ExternalSourceConnector, MzOffset, SourceError, Timestamp,
     WorkerPersistenceData,
 };
-use expr::{PartitionId, SourceInstanceId};
+use expr::{GlobalId, PartitionId, SourceInstanceId};
 use futures::sink::Sink;
 use lazy_static::lazy_static;
 use log::error;
@@ -37,6 +41,7 @@ use prometheus::{
     register_uint_gauge_vec, DeleteOnDropCounter, DeleteOnDropGauge, IntCounter, IntCounterVec,
     IntGaugeVec, UIntGauge, UIntGaugeVec,
 };
+use repr::Row;
 use timely::dataflow::Scope;
 use timely::scheduling::activate::{Activator, SyncActivator};
 use timely::Data;
@@ -88,9 +93,11 @@ pub struct SourceConfig<'a, G> {
     pub encoding: DataEncoding,
     /// Channel to send persistence information to persister thread
     pub persistence_tx: Option<Pin<Box<dyn Sink<WorkerPersistenceData, Error = ()>>>>,
+    /// ...
+    pub persisted_files: Option<Vec<PathBuf>>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// A record produced by a source
 pub struct SourceOutput<K, V>
 where
@@ -311,6 +318,11 @@ pub trait SourceInfo<Out> {
         _timestamp: Timestamp,
     ) {
         // Default implementation is to do nothing
+    }
+
+    /// ...
+    fn read_persisted_files(&self, _files: Vec<PathBuf>) -> Vec<(Out, Timestamp, i64)> {
+        panic!("unimplemented");
     }
 }
 
@@ -718,6 +730,75 @@ impl PartitionMetrics {
     }
 }
 
+// todo put this somewhere sane
+
+/// ...
+pub struct RecordIter {
+    data: Vec<u8>,
+}
+
+/// ...
+#[derive(Debug, Clone)]
+pub struct Record {
+    offset: i64,
+    time: i64,
+    data: Vec<u8>,
+}
+
+impl RecordIter {
+    fn next_rec(&mut self) -> Row {
+        let len = NetworkEndian::read_u32(&self.data);
+        let (_, rest) = self.data.split_at_mut(4);
+        let (row, data) = rest.split_at_mut(len as usize);
+        let row = row.to_vec();
+        // TODO: slow! figure out how not to copy here?
+        self.data = data.to_vec();
+        Row::decode(row)
+    }
+}
+
+impl Iterator for RecordIter {
+    type Item = Record;
+
+    fn next(&mut self) -> Option<Record> {
+        if self.data.len() == 0 {
+            return None;
+        }
+        let rec = self.next_rec();
+        let row = rec.unpack();
+        let offset = row[0].unwrap_int64();
+        let time = row[1].unwrap_int64();
+        let data = row[2].unwrap_bytes();
+        Some(Record {
+            offset,
+            time,
+            data: data.into(),
+        })
+    }
+}
+
+/// Describes what is provided from a persisted file.
+#[derive(Debug)]
+pub struct PersistedFileMetadata {
+    id: GlobalId,
+    partition_id: i32,
+    start_offset: i64,
+    end_offset: i64,
+}
+
+impl PersistedFileMetadata {
+    /// Parse a file's metadata from its filename.
+    pub fn from_fname(s: &str) -> Result<Self, Error> {
+        let parts: Vec<&str> = s.split("-").collect();
+        Ok(PersistedFileMetadata {
+            id: parts[2].parse()?,
+            partition_id: parts[3].parse()?,
+            start_offset: parts[4].parse()?,
+            end_offset: parts[5].parse()?,
+        })
+    }
+}
+
 /// Creates a source dataflow operator. The type of ExternalSourceConnector determines the
 /// type of source that should be created
 pub fn create_source<G, S: 'static, Out>(
@@ -733,7 +814,7 @@ pub fn create_source<G, S: 'static, Out>(
 where
     G: Scope<Timestamp = Timestamp>,
     S: SourceInfo<Out> + SourceConstructor<Out>,
-    Out: Clone + Send + Default + MaybeLength + 'static,
+    Out: Debug + Clone + Send + Default + MaybeLength + 'static,
 {
     let SourceConfig {
         name,
@@ -748,6 +829,7 @@ where
         active,
         encoding,
         mut persistence_tx,
+        persisted_files,
         ..
     } = config;
 
@@ -787,6 +869,8 @@ where
             encoding,
         );
 
+        let mut run = false;
+
         move |cap, output| {
             // First check that the source was successfully created
             let source_info = match &mut source_info {
@@ -796,6 +880,19 @@ where
                     return SourceStatus::Done;
                 }
             };
+
+            if !run {
+                run = true;
+                if let Some(files) = persisted_files.clone() {
+                    let msgs = source_info.read_persisted_files(files);
+                    for m in msgs {
+                        let ts_cap = cap.delayed(&m.1);
+                        output
+                            .session(&ts_cap)
+                            .give(Ok(SourceOutput::new(vec![], m.0, Some(m.2))));
+                    }
+                }
+            }
 
             if active {
                 // Bound execution of operator to prevent a single operator from hogging
