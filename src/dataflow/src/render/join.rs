@@ -20,7 +20,7 @@ use timely::dataflow::Scope;
 use timely::progress::{timestamp::Refines, Timestamp};
 
 use dataflow_types::*;
-use expr::{RelationExpr, ScalarExpr};
+use expr::{MapFilterProject, RelationExpr, ScalarExpr};
 use repr::{Datum, Row, RowArena};
 
 use crate::operator::CollectionExt;
@@ -35,6 +35,7 @@ where
     pub fn render_join(
         &mut self,
         relation_expr: &RelationExpr,
+        mut mfp: MapFilterProject,
         predicates: &[ScalarExpr],
         // TODO(frank): use this argument to create a region surrounding the join.
         _scope: &mut G,
@@ -71,7 +72,8 @@ where
             // Maintain sources of each in-progress column.
             let mut source_columns = input_mapper.global_columns(*start).collect::<Vec<_>>();
 
-            let mut predicates = predicates.to_vec();
+            mfp = mfp.clone().filter(predicates.to_vec());
+            let mut predicates = vec![];
             if start_arr.is_none() || inputs.len() == 1 {
                 // If there is no starting arrangement, then we can run filters
                 // directly on the starting collection.
@@ -85,6 +87,13 @@ where
                 joined = j;
                 if let Some(es) = es {
                     errs.concat(&es);
+                }
+
+                let (j, es) =
+                    crate::render::delta_join::build_mfp(joined, &source_columns, &mut mfp);
+                joined = j;
+                if let Some(es) = es {
+                    errs = errs.concat(&es);
                 }
             }
 
@@ -232,12 +241,21 @@ where
                 errs = errs.concat(&es);
                 source_columns = prev_vals.into_iter().chain(next_source_vals).collect();
 
+                mfp = mfp.clone().filter(predicates.to_vec());
+                let mut predicates = vec![];
                 let (j, es) = crate::render::delta_join::build_filter(
                     joined,
                     &source_columns,
                     &mut predicates,
                     &mut equivalences,
                 );
+                joined = j;
+                if let Some(es) = es {
+                    errs = errs.concat(&es);
+                }
+
+                let (j, es) =
+                    crate::render::delta_join::build_mfp(joined, &source_columns, &mut mfp);
                 joined = j;
                 if let Some(es) = es {
                     errs = errs.concat(&es);

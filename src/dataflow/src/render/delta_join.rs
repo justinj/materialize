@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use timely::dataflow::Scope;
 
 use dataflow_types::DataflowError;
-use expr::{JoinInputMapper, RelationExpr, ScalarExpr};
+use expr::{JoinInputMapper, MapFilterProject, RelationExpr, ScalarExpr};
 use repr::{Datum, Row, RowArena, Timestamp};
 
 use super::context::{ArrangementFlavor, Context};
@@ -29,6 +29,7 @@ where
         &mut self,
         relation_expr: &RelationExpr,
         predicates: &[ScalarExpr],
+        mfp: MapFilterProject,
         scope: &mut G,
         worker_index: usize,
         subtract: F,
@@ -70,7 +71,6 @@ where
                         // Collects error streams for the inner scope. Concats before leaving.
                         let mut inner_errs = Vec::with_capacity(inputs.len());
                         for relation in 0..inputs.len() {
-
                             // We maintain a private copy of `equivalences`, which we will digest
                             // as we produce the join.
                             let mut equivalences = equivalences.clone();
@@ -98,12 +98,24 @@ where
                                 let mut source_columns = input_mapper.global_columns(relation)
                                     .collect::<Vec<_>>();
 
-                                let mut predicates = predicates.to_vec();
-                                let (mut update_stream, errs) = build_filter(
+                                let mut mfp = mfp.clone().filter(predicates.to_vec());
+                                // TODO(justin): apply this in differential too and remove this
+                                // parameter.
+                                let mut predicates = vec![];
+                                let (update_stream, errs) = build_filter(
                                     update_stream,
                                     &source_columns,
                                     &mut predicates,
                                     &mut equivalences,
+                                );
+                                if let Some(errs) = errs {
+                                    region_errs.push(errs);
+                                }
+
+                                let (mut update_stream, errs) = build_mfp(
+                                    update_stream,
+                                    &source_columns,
+                                    &mut mfp,
                                 );
                                 if let Some(errs) = errs {
                                     region_errs.push(errs);
@@ -219,12 +231,24 @@ where
                                     source_columns
                                         .extend(input_mapper.global_columns(*other));
 
+                                    let mut predicates = vec![];
                                     let (oks, errs) = build_filter(
                                         update_stream,
                                         &source_columns,
                                         &mut predicates,
                                         &mut equivalences,
                                     );
+                                    update_stream = oks;
+                                    if let Some(errs) = errs {
+                                        region_errs.push(errs);
+                                    }
+
+                                    let (oks, errs) = build_mfp(
+                                        update_stream,
+                                        &source_columns,
+                                        &mut mfp,
+                                    );
+
                                     update_stream = oks;
                                     if let Some(errs) = errs {
                                         region_errs.push(errs);
@@ -322,6 +346,45 @@ where
     );
 
     (oks, errs)
+}
+
+pub fn build_mfp<G>(
+    updates: Collection<G, Row>,
+    source_columns: &[usize],
+    mfp: &mut MapFilterProject,
+) -> (Collection<G, Row>, Option<Collection<G, DataflowError>>)
+where
+    G: Scope,
+    G::Timestamp: Lattice,
+{
+    let available = source_columns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (*c, i))
+        .collect();
+    // TODO: take?
+    let (before, after) = mfp.clone().partition(&available, source_columns.len());
+
+    println!("before: {:?}", before);
+    println!("after: {:?}", after);
+
+    *mfp = after;
+
+    if before.is_identity() {
+        (updates, None)
+    } else {
+        let (oks, errs) = updates.flat_map_fallible({
+            let mut row_packer = repr::RowPacker::new();
+            move |input_row| {
+                let temp_storage = RowArena::new();
+                before
+                    .evaluate(&mut input_row.unpack(), &temp_storage, &mut row_packer)
+                    .map_err(|e| e.into())
+                    .transpose()
+            }
+        });
+        (oks, Some(errs))
+    }
 }
 
 /// Filters updates on some columns by predicates that are ready to go.

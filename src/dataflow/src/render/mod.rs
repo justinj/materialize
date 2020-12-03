@@ -749,33 +749,63 @@ where
     ) -> bool {
         // Extract a MapFilterProject and residual from `relation_expr`.
         let (mfp, input) = MapFilterProject::extract_from_expression(relation_expr);
-        if let RelationExpr::Get { .. } = input {
-            let mfp2 = mfp.clone();
-            self.ensure_rendered(&input, scope, worker_index);
-            let (ok_collection, mut err_collection) = self
-                .flat_map_ref(&input, move |exprs| mfp2.literal_constraints(exprs), {
-                    let mut row_packer = repr::RowPacker::new();
-                    move |row| {
-                        let temp_storage = RowArena::new();
-                        mfp.evaluate(&mut row.unpack(), &temp_storage, &mut row_packer)
-                            .map_err(|e| e.into())
-                            .transpose()
+        match input {
+            RelationExpr::Get { .. } => {
+                let mfp2 = mfp.clone();
+                self.ensure_rendered(&input, scope, worker_index);
+                let (ok_collection, mut err_collection) = self
+                    .flat_map_ref(&input, move |exprs| mfp2.literal_constraints(exprs), {
+                        let mut row_packer = repr::RowPacker::new();
+                        move |row| {
+                            let temp_storage = RowArena::new();
+                            mfp.evaluate(&mut row.unpack(), &temp_storage, &mut row_packer)
+                                .map_err(|e| e.into())
+                                .transpose()
+                        }
+                    })
+                    .unwrap();
+
+                use timely::dataflow::operators::ok_err::OkErr;
+                let (oks, errors) = ok_collection.inner.ok_err(|(x, t, d)| match x {
+                    Ok(x) => Ok((x, t, d)),
+                    Err(x) => Err((x, t, d)),
+                });
+                err_collection = err_collection.concat(&errors.as_collection());
+
+                self.collections
+                    .insert(relation_expr.clone(), (oks.as_collection(), err_collection));
+                true
+            }
+            RelationExpr::Join {
+                inputs,
+                implementation,
+                ..
+            } => {
+                println!("                 ");
+                println!("====RENDERING====");
+                println!("                 ");
+                for input in inputs {
+                    self.ensure_rendered(input, scope, worker_index);
+                }
+                match implementation {
+                    expr::JoinImplementation::Differential(_start, _order) => {
+                        let collection = self.render_join(input, mfp, &[], scope);
+                        self.collections.insert(relation_expr.clone(), collection);
                     }
-                })
-                .unwrap();
-
-            use timely::dataflow::operators::ok_err::OkErr;
-            let (oks, errors) = ok_collection.inner.ok_err(|(x, t, d)| match x {
-                Ok(x) => Ok((x, t, d)),
-                Err(x) => Err((x, t, d)),
-            });
-            err_collection = err_collection.concat(&errors.as_collection());
-
-            self.collections
-                .insert(relation_expr.clone(), (oks.as_collection(), err_collection));
-            true
-        } else {
-            false
+                    expr::JoinImplementation::DeltaQuery(_orders) => {
+                        let collection =
+                            self.render_delta_join(input, &[], mfp, scope, worker_index, |t| {
+                                t.saturating_sub(1)
+                            });
+                        self.collections.insert(relation_expr.clone(), collection);
+                    }
+                    expr::JoinImplementation::Unimplemented => {
+                        panic!("Attempt to render unimplemented join");
+                    }
+                }
+                true
+            }
+            _ => false,
         }
     }
 
@@ -970,13 +1000,18 @@ where
                                 self.ensure_rendered(input, scope, worker_index);
                             }
                             let (ok_collection, err_collection) = match implementation {
-                                expr::JoinImplementation::Differential(_start, _order) => {
-                                    self.render_join(input, predicates, scope)
-                                }
+                                expr::JoinImplementation::Differential(_start, _order) => self
+                                    .render_join(
+                                        input,
+                                        MapFilterProject::new(input.arity()),
+                                        predicates,
+                                        scope,
+                                    ),
                                 expr::JoinImplementation::DeltaQuery(_orders) => self
                                     .render_delta_join(
                                         input,
                                         predicates,
+                                        MapFilterProject::new(input.arity()),
                                         scope,
                                         worker_index,
                                         |t| t.saturating_sub(1),
@@ -1016,15 +1051,25 @@ where
                     for input in inputs {
                         self.ensure_rendered(input, scope, worker_index);
                     }
+                    let mut arity = 0;
+                    for input in inputs {
+                        arity += input.arity();
+                    }
                     match implementation {
                         expr::JoinImplementation::Differential(_start, _order) => {
-                            let collection = self.render_join(relation_expr, &[], scope);
+                            let collection = self.render_join(
+                                relation_expr,
+                                MapFilterProject::new(arity),
+                                &[],
+                                scope,
+                            );
                             self.collections.insert(relation_expr.clone(), collection);
                         }
                         expr::JoinImplementation::DeltaQuery(_orders) => {
                             let collection = self.render_delta_join(
                                 relation_expr,
                                 &[],
+                                MapFilterProject::new(arity),
                                 scope,
                                 worker_index,
                                 |t| t.saturating_sub(1),
