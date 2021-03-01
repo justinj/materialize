@@ -17,6 +17,7 @@ use sql::ast::{
     CreateViewStatement, DataType, Function, Ident, Raw, RawName, Statement, TableFactor,
     UnresolvedObjectName,
 };
+use sql::plan::resolve_names_stmt;
 
 use crate::catalog::{Catalog, SerializedCatalogItem};
 use crate::catalog::{MZ_CATALOG_SCHEMA, MZ_INTERNAL_SCHEMA, PG_CATALOG_SCHEMA};
@@ -255,6 +256,42 @@ pub const CONTENT_MIGRATIONS: &[fn(&mut Catalog) -> Result<(), anyhow::Error>] =
             tx.update_item(id, &name.item, &serialized_item)?;
         }
         tx.commit()?;
+        Ok(())
+    },
+    // Rewrites all table references to use their id as reference rather than
+    // their name. This allows us to safely rename tables without having to
+    // rewrite their dependents.
+    //
+    // Introduced for v0.7.1
+    |catalog: &mut Catalog| {
+        let mut storage = catalog.storage();
+        let items = storage.load_items()?;
+        // let tx = storage.transaction()?;
+        let cat = catalog.for_system_session();
+        println!("catalog = {:#?}", cat);
+
+        for (id, name, def) in items {
+            let SerializedCatalogItem::V1 {
+                create_sql,
+                eval_env,
+            } = serde_json::from_slice(&def)?;
+
+            let stmt = sql::parse::parse(&create_sql)?.into_element();
+
+            // This `unwrap` fails because it cannot find an item it is looking up (which
+            // exists and was visited earlier in this loop).
+            resolve_names_stmt(&cat, stmt.clone()).unwrap();
+
+            // let serialized_item = SerializedCatalogItem::V1 {
+            //     create_sql: resolved.to_ast_string_stable(),
+            //     eval_env,
+            // };
+
+            // let serialized_item =
+            //     serde_json::to_vec(&serialized_item).expect("catalog serialization cannot fail");
+            // tx.update_item(id, &name.item, &serialized_item)?;
+        }
+        // tx.commit()?;
         Ok(())
     },
     // Add new migrations here.

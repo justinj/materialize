@@ -251,12 +251,12 @@ impl<'a> Fold<Raw, Aug> for NameResolver<'a> {
 }
 
 pub fn resolve_names_stmt(
-    scx: &StatementContext,
+    catalog: &dyn Catalog,
     query: Statement<Raw>,
 ) -> Result<Statement<Aug>, anyhow::Error> {
     let mut n = NameResolver {
         status: Ok(()),
-        catalog: scx.catalog,
+        catalog,
         ctes: HashMap::new(),
         ids: HashSet::new(),
     };
