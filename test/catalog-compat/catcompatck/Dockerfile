@@ -11,6 +11,7 @@ ARG BUILDKITE_BUILD_NUMBER
 
 FROM materialize/materialized:v0.1.0 AS golden010
 FROM materialize/materialized:v0.6.0 AS golden060
+FROM materialize/materialized:v0.7.0 AS golden070
 MZFROM materialized AS edge
 MZFROM testdrive AS testdrive
 FROM ubuntu:bionic-20200403
@@ -19,6 +20,7 @@ RUN apt-get update && apt-get install -y curl postgresql-client-10 wait-for-it
 
 COPY --from=golden010 /usr/local/bin/materialized /usr/local/bin/materialized-golden010
 COPY --from=golden060 /usr/local/bin/materialized /usr/local/bin/materialized-golden060
+COPY --from=golden070 /usr/local/bin/materialized /usr/local/bin/materialized-golden070
 COPY --from=edge /usr/local/bin/materialized /usr/local/bin/materialized-edge
 COPY --from=testdrive /usr/local/bin/testdrive /usr/local/bin/testdrive
 COPY catcompatck /usr/local/bin/catcompatck

@@ -7,6 +7,8 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::borrow::BorrowMut;
+
 use anyhow::bail;
 
 use ore::collections::CollectionExt;
@@ -264,11 +266,12 @@ pub const CONTENT_MIGRATIONS: &[fn(&mut Catalog) -> Result<(), anyhow::Error>] =
     //
     // Introduced for v0.7.1
     |catalog: &mut Catalog| {
+        let cat = Catalog::open_from(catalog.clone())?;
+        let cat = cat.for_system_session();
+
+        let items = catalog.storage().load_items()?;
         let mut storage = catalog.storage();
-        let items = storage.load_items()?;
-        // let tx = storage.transaction()?;
-        let cat = catalog.for_system_session();
-        println!("catalog = {:#?}", cat);
+        let tx = storage.transaction()?;
 
         for (id, name, def) in items {
             let SerializedCatalogItem::V1 {
@@ -278,20 +281,18 @@ pub const CONTENT_MIGRATIONS: &[fn(&mut Catalog) -> Result<(), anyhow::Error>] =
 
             let stmt = sql::parse::parse(&create_sql)?.into_element();
 
-            // This `unwrap` fails because it cannot find an item it is looking up (which
-            // exists and was visited earlier in this loop).
-            resolve_names_stmt(&cat, stmt.clone()).unwrap();
+            let resolved = resolve_names_stmt(&cat, stmt.clone()).unwrap();
 
-            // let serialized_item = SerializedCatalogItem::V1 {
-            //     create_sql: resolved.to_ast_string_stable(),
-            //     eval_env,
-            // };
+            let serialized_item = SerializedCatalogItem::V1 {
+                create_sql: resolved.to_ast_string_stable(),
+                eval_env,
+            };
 
-            // let serialized_item =
-            //     serde_json::to_vec(&serialized_item).expect("catalog serialization cannot fail");
-            // tx.update_item(id, &name.item, &serialized_item)?;
+            let serialized_item =
+                serde_json::to_vec(&serialized_item).expect("catalog serialization cannot fail");
+            tx.update_item(id, &name.item, &serialized_item)?;
         }
-        // tx.commit()?;
+        tx.commit()?;
         Ok(())
     },
     // Add new migrations here.

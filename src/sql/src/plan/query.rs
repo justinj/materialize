@@ -188,6 +188,7 @@ impl<'a> Fold<Raw, Aug> for NameResolver<'a> {
         &mut self,
         object_name: <Raw as AstInfo>::ObjectName,
     ) -> <Aug as AstInfo>::ObjectName {
+        println!("CTES = {:?}", self.ctes);
         match object_name {
             RawName::Name(raw_name) => {
                 // Check if unqualified name refers to a CTE.
@@ -197,7 +198,7 @@ impl<'a> Fold<Raw, Aug> for NameResolver<'a> {
                         return ResolvedObjectName {
                             id: Id::Local(*id),
                             raw_name: normalize::unresolved_object_name(raw_name).unwrap(),
-                            print_id: true,
+                            print_id: false,
                         };
                     }
                 }
@@ -252,7 +253,7 @@ impl<'a> Fold<Raw, Aug> for NameResolver<'a> {
 
 pub fn resolve_names_stmt(
     catalog: &dyn Catalog,
-    query: Statement<Raw>,
+    stmt: Statement<Raw>,
 ) -> Result<Statement<Aug>, anyhow::Error> {
     let mut n = NameResolver {
         status: Ok(()),
@@ -260,7 +261,7 @@ pub fn resolve_names_stmt(
         ctes: HashMap::new(),
         ids: HashSet::new(),
     };
-    let result = n.fold_statement(query);
+    let result = n.fold_statement(stmt);
     n.status?;
     Ok(result)
 }

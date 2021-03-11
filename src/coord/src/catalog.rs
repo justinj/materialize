@@ -87,7 +87,7 @@ pub const FIRST_USER_OID: u32 = 20_000;
 /// The catalog also maintains special "ambient schemas": virtual schemas,
 /// implicitly present in all databases, that house various system views.
 /// The big examples of ambient schemas are `pg_catalog` and `mz_catalog`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Catalog {
     by_name: BTreeMap<String, Database>,
     by_id: BTreeMap<GlobalId, CatalogEntry>,
@@ -116,7 +116,7 @@ impl ConnCatalog<'_> {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct Database {
     pub name: String,
     pub id: i64,
@@ -125,7 +125,7 @@ pub struct Database {
     pub schemas: BTreeMap<String, Schema>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct Schema {
     pub name: SchemaName,
     pub id: i64,
@@ -135,7 +135,7 @@ pub struct Schema {
     pub functions: BTreeMap<String, GlobalId>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct Role {
     pub name: String,
     pub id: i64,
@@ -747,6 +747,36 @@ impl Catalog {
             events.push(catalog.insert_item(id, oid, name, item));
         }
         Ok((catalog, events))
+    }
+
+    pub fn open_from(mut c: Catalog) -> Result<Catalog, Error> {
+        let items = c.storage().load_items()?;
+        for (id, name, def) in items {
+            // TODO(benesch): a better way of detecting when a view has depended
+            // upon a non-existent logging view. This is fine for now because
+            // the only goal is to produce a nicer error message; we'll bail out
+            // safely even if the error message we're sniffing out changes.
+            lazy_static! {
+                static ref LOGGING_ERROR: Regex =
+                    Regex::new("unknown catalog item 'mz_catalog.[^']*'").unwrap();
+            }
+            let item = match c.deserialize_item(def) {
+                Ok(item) => item,
+                Err(e) if LOGGING_ERROR.is_match(&e.to_string()) => {
+                    return Err(Error::new(ErrorKind::UnsatisfiableLoggingDependency {
+                        depender_name: name.to_string(),
+                    }));
+                }
+                Err(e) => {
+                    return Err(Error::new(ErrorKind::Corruption {
+                        detail: format!("failed to deserialize item {} ({}): {}", id, name, e),
+                    }))
+                }
+            };
+            let oid = c.allocate_oid()?;
+            let _ = c.insert_item(id, oid, name, item);
+        }
+        Ok(c)
     }
 
     /// Opens the catalog at `path` with parameters set appropriately for debug
